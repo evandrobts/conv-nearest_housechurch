@@ -19,6 +19,17 @@ UF_SIGLAS = {"sp", "são paulo", "sao paulo"}
 
 CEP_RE = re.compile(r"\b\d{5}-?\d{3}\b")
 
+def _in_locality(result, city_name: str) -> bool:
+    """Retorna True se o resultado tiver locality == city_name (ex.: Campinas)."""
+    try:
+        for comp in result.get("address_components", []):
+            if "locality" in comp.get("types", []):
+                if comp.get("long_name", "").lower() == city_name.lower():
+                    return True
+        return False
+    except Exception:
+        return False
+
 def _km(a_lat, a_lng, b_lat, b_lng):
     R = 6371.0
     from math import radians, sin, cos, atan2, sqrt
@@ -113,11 +124,8 @@ def _score_geocode_result(res):
     try:
         loc = res["geometry"]["location"]
         lat, lng = float(loc["lat"]), float(loc["lng"])
-        # bônus por cair dentro do retângulo
-        in_bbox = (BBOX_S <= lat <= BBOX_N) and (BBOX_W <= lng <= BBOX_E)
-        if in_bbox:
+        if (BBOX_S <= lat <= BBOX_N) and (BBOX_W <= lng <= BBOX_E):
             base -= 0.5
-        # penalidade gradual por distância ao centro
         d_km = _km(CAMPINAS_CENTER[0], CAMPINAS_CENTER[1], lat, lng)
         base += min(d_km / 50.0, 2.0)  # até +2
     except Exception:
@@ -128,11 +136,11 @@ def _score_geocode_result(res):
 def geocode_google_biased(q: str):
     """
     Ordem de tentativas:
-      A) (se ambígua) address = "<q>, Campinas - SP", components=locality:Campinas|administrative_area:SP|country:BR
-      B) address = q, components=country:BR|administrative_area:SP, bounds=Campinas
-      C) address = q, components=country:BR|administrative_area:SP
-      D) address = q, components=country:BR
-    Retorna (lat, lon, formatted_address, place_id) ou (None, None, None, None)
+      A) (se ambígua) address="<q>, Campinas - SP" + components=locality:Campinas|administrative_area:SP|country:BR
+      B) address=q + components=country:BR|administrative_area:SP + bounds=Campinas
+      C) address=q + components=country:BR|administrative_area:SP
+      D) address=q + components=country:BR
+    Em cada chamada, se a query for ambígua, preferimos resultados com locality==Campinas.
     """
     if not GOOGLE_MAPS_API_KEY or not q:
         return None, None, None, None
@@ -140,36 +148,58 @@ def geocode_google_biased(q: str):
     url = "https://maps.googleapis.com/maps/api/geocode/json"
 
     def call(params):
+        # linguagem PT-BR ajuda nas correspondências
+        params = {**params, "language": "pt-BR"}
         try:
             r = requests.get(url, params=params, timeout=12)
             r.raise_for_status()
             return r.json()
         except requests.RequestException:
-            return {"status":"REQUEST_FAILED","results":[]}
+            return {"status": "REQUEST_FAILED", "results": []}
 
-    def pick_best(data):
-        if data.get("status") == "OK" and data.get("results"):
-            best = sorted(data["results"], key=_score_geocode_result)[0]
-            loc = best["geometry"]["location"]
-            return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
-        return None
+    def pick_best(data, prefer_city: str | None):
+        """Se prefer_city estiver definido, tenta um 'melhor' de Campinas antes."""
+        if data.get("status") != "OK" or not data.get("results"):
+            return None
+        results = data["results"]
 
-    # CEP → deixe o Google trabalhar sem “colar Campinas”
-    if CEP_RE.search(q):
-        base = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br", "components": "country:BR"}
-        got = pick_best(call(base))
-        if got: return got
+        # 1) Se houver prefer_city, pegue o melhor dentre os que são dessa cidade
+        if prefer_city:
+            campinas_hits = [r for r in results if _in_locality(r, prefer_city)]
+            if campinas_hits:
+                best = sorted(campinas_hits, key=_score_geocode_result)[0]
+                loc = best["geometry"]["location"]
+                return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
 
-    # A) se ambígua, força Campinas na address + components
-    if _query_is_ambiguous(q):
+        # 2) Caso contrário, melhor geral
+        best = sorted(results, key=_score_geocode_result)[0]
+        loc = best["geometry"]["location"]
+        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
+
+    ambiguous = _query_is_ambiguous(q)
+
+    # A) (somente se ambígua) Força Campinas no texto + components com locality
+    if ambiguous:
         a = {
             "address": f"{q}, Campinas - SP",
             "key": GOOGLE_MAPS_API_KEY,
             "region": "br",
             "components": "locality:Campinas|administrative_area:SP|country:BR",
         }
-        got = pick_best(call(a))
-        if got: return got
+        got = pick_best(call(a), prefer_city="Campinas")
+        if got:
+            return got
+
+        # A2) Variante do texto (às vezes funciona melhor)
+        a2 = {
+            "address": f"{q} Campinas SP Brasil",
+            "key": GOOGLE_MAPS_API_KEY,
+            "region": "br",
+            "components": "locality:Campinas|administrative_area:SP|country:BR",
+        }
+        got = pick_best(call(a2), prefer_city="Campinas")
+        if got:
+            return got
 
     # B) SP + bounds (Campinas)
     b = {
@@ -179,20 +209,29 @@ def geocode_google_biased(q: str):
         "components": "country:BR|administrative_area:SP",
         "bounds": f"{BBOX_SW[0]},{BBOX_SW[1]}|{BBOX_NE[0]},{BBOX_NE[1]}",
     }
-    got = pick_best(call(b))
-    if got: return got
+    got = pick_best(call(b), prefer_city=("Campinas" if ambiguous else None))
+    if got:
+        return got
 
     # C) SP
-    c = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br", "components": "country:BR|administrative_area:SP"}
-    got = pick_best(call(c))
-    if got: return got
+    c = {
+        "address": q,
+        "key": GOOGLE_MAPS_API_KEY,
+        "region": "br",
+        "components": "country:BR|administrative_area:SP",
+    }
+    got = pick_best(call(c), prefer_city=("Campinas" if ambiguous else None))
+    if got:
+        return got
 
     # D) BR
     d = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br", "components": "country:BR"}
-    got = pick_best(call(d))
-    if got: return got
+    got = pick_best(call(d), prefer_city=("Campinas" if ambiguous else None))
+    if got:
+        return got
 
     return None, None, None, None
+
 
 
 def gmaps_reverse_geocode(lat: float, lon: float):
