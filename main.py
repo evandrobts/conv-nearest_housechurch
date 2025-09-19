@@ -178,6 +178,9 @@ def geocode_google_biased(q: str):
 
     ambiguous = _query_is_ambiguous(q)
 
+    if ambiguous and q.strip().lower() in {"centro", "centro campinas"}:
+        return CAMPINAS_CENTER[0], CAMPINAS_CENTER[1], "Centro, Campinas - SP", None
+
     # A) (somente se ambígua) Força Campinas no texto + components com locality
     if ambiguous:
         a = {
