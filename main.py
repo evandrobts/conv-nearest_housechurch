@@ -1,20 +1,60 @@
 import os
-import json
 import math
+import json
 import requests
 import functions_framework
 from flask import jsonify, request
 from google.cloud import firestore
+from urllib.parse import quote
 
-# ======= Config região de Campinas =======
-CAMPINAS_CENTER = (-22.90556, -47.06083)  # Praça Luiz de Camões ~ centro
-# Retângulo que cobre Campinas, Valinhos, Vinhedo, parte de Hortolândia
-BBOX_SW = os.environ.get("BBOX_SW", "")  # sudoeste (lat, lon)
-BBOX_NE = os.environ.get("BBOX_NE", "")  # nordeste (lat, lon)
+# =========================
+# Config & Bounds (Campinas)
+# =========================
 
-GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+def _load_bounds():
+    """
+    Lê a caixa da região:
+    - GEOCODE_BOUNDS="west,south,east,north" (recomendado)
+    - ou BBOX_SW="lat_sul,lon_oeste" e BBOX_NE="lat_norte,lon_leste"
+    - fallback: box ampla da RMC que você passou
+    """
+    gb = os.getenv("GEOCODE_BOUNDS", "").strip()
+    if gb:
+        try:
+            w, s, e, n = [float(x) for x in gb.split(",")]
+            return w, s, e, n
+        except Exception:
+            pass
 
-# Prioridade por tipo de resultado do Geocoding (quanto menor, melhor)
+    sw = os.getenv("BBOX_SW", "").strip()
+    ne = os.getenv("BBOX_NE", "").strip()
+    if sw and ne:
+        try:
+            s_lat, w_lon = [float(x) for x in sw.split(",")]
+            n_lat, e_lon = [float(x) for x in ne.split(",")]
+            return w_lon, s_lat, e_lon, n_lat
+        except Exception:
+            pass
+
+    # Default (RM de Campinas)
+    return (-47.4485604153, -23.3051443266, -46.546640812, -22.5353721487)
+
+BBOX_W, BBOX_S, BBOX_E, BBOX_N = _load_bounds()
+BBOX_SW = (BBOX_S, BBOX_W)  # (lat, lon)
+BBOX_NE = (BBOX_N, BBOX_E)  # (lat, lon)
+
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+if not GOOGLE_MAPS_API_KEY:
+    raise RuntimeError("Defina GOOGLE_MAPS_API_KEY nas variáveis de ambiente.")
+
+FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "churches")
+FIRESTORE_DATABASE = os.getenv("FIRESTORE_DATABASE")  # None => default
+db = firestore.Client(database=FIRESTORE_DATABASE) if FIRESTORE_DATABASE else firestore.Client()
+
+# =========================
+# Geocoding (Google) enviesado p/ Campinas
+# =========================
+
 _GEOCODE_TYPE_PRIORITY = {
     "street_address": 0,
     "premise": 1,
@@ -29,11 +69,10 @@ _GEOCODE_TYPE_PRIORITY = {
 def _score_geocode_result(res):
     types = res.get("types", [])
     base = min((_GEOCODE_TYPE_PRIORITY.get(t, 8) for t in types), default=8)
-    # bônus se cair dentro do retângulo
     try:
         loc = res["geometry"]["location"]
         lat, lng = float(loc["lat"]), float(loc["lng"])
-        in_bbox = (BBOX_SW[0] <= lat <= BBOX_NE[0]) and (BBOX_SW[1] <= lng <= BBOX_NE[1])
+        in_bbox = (BBOX_S <= lat <= BBOX_N) and (BBOX_W <= lng <= BBOX_E)
         if in_bbox:
             base -= 0.5
     except Exception:
@@ -42,32 +81,25 @@ def _score_geocode_result(res):
 
 def geocode_google_biased(q):
     """
-    Geocodifica com viés p/ Campinas. Tenta em 3 passos:
-      1) components BR+SP + bounds Campinas
-      2) components BR+SP (sem bounds)
-      3) components BR (fallback amplo)
-    Retorna (lat, lon, formatted_address, place_id) ou (None, None, None, None)
+    1) BR+SP + bounds (Campinas)
+    2) BR+SP
+    3) BR
     """
-    if not GOOGLE_MAPS_API_KEY:
+    if not q:
         return None, None, None, None
 
     url = "https://maps.googleapis.com/maps/api/geocode/json"
 
     def call(params):
         try:
-            r = requests.get(url, params=params, timeout=10)
+            r = requests.get(url, params=params, timeout=12)
             r.raise_for_status()
             return r.json()
         except requests.RequestException:
             return {"status": "REQUEST_FAILED", "results": []}
 
-    base_params = {
-        "address": q,
-        "key": GOOGLE_MAPS_API_KEY,
-        "region": "br",
-    }
+    base_params = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br"}
 
-    # 1) Viés forte: BR+SP + bounds no retângulo de Campinas
     p1 = {
         **base_params,
         "components": "country:BR|administrative_area:SP",
@@ -77,147 +109,26 @@ def geocode_google_biased(q):
     if data.get("status") == "OK" and data.get("results"):
         best = sorted(data["results"], key=_score_geocode_result)[0]
         loc = best["geometry"]["location"]
-        return loc["lat"], loc["lng"], best.get("formatted_address"), best.get("place_id")
+        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
 
-    # 2) Restrito ao estado (sem bounds)
     p2 = {**base_params, "components": "country:BR|administrative_area:SP"}
     data = call(p2)
     if data.get("status") == "OK" and data.get("results"):
         best = sorted(data["results"], key=_score_geocode_result)[0]
         loc = best["geometry"]["location"]
-        return loc["lat"], loc["lng"], best.get("formatted_address"), best.get("place_id")
+        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
 
-    # 3) Apenas BR
     p3 = {**base_params, "components": "country:BR"}
     data = call(p3)
     if data.get("status") == "OK" and data.get("results"):
         best = sorted(data["results"], key=_score_geocode_result)[0]
         loc = best["geometry"]["location"]
-        return loc["lat"], loc["lng"], best.get("formatted_address"), best.get("place_id")
+        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
 
     return None, None, None, None
 
-
-
-
-
-# ========= Config =========
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-if not GOOGLE_MAPS_API_KEY:
-    raise RuntimeError("Defina GOOGLE_MAPS_API_KEY nas variáveis de ambiente.")
-
-FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "churches")
-FIRESTORE_DATABASE = os.getenv("FIRESTORE_DATABASE")  # None => (default)
-
-# Firestore client
-db = firestore.Client(database=FIRESTORE_DATABASE) if FIRESTORE_DATABASE else firestore.Client()
-
-# ========= Utils =========
-def haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    dlat = math.radians(float(lat2) - float(lat1))
-    dlon = math.radians(float(lon2) - float(lon1))
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(float(lat1))) * \
-        math.cos(math.radians(float(lat2))) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c
-
-def gmaps_geocode(address_or_cep: str):
-    """
-    Usa Google Geocoding API com bias para BR.
-    Retorna (lat, lon, formatted_address, place_id) ou (None, None, None, None).
-    """
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {
-        "address": f"{address_or_cep}, Brasil",
-        "key": GOOGLE_MAPS_API_KEY,
-        "components": "country:BR",
-        "region": "br",
-    }
-    try:
-        r = requests.get(url, params=params, timeout=12)
-        data = r.json()
-        status = data.get("status")
-        if status == "OK":
-            res = data["results"][0]
-            loc = res["geometry"]["location"]
-            return float(loc["lat"]), float(loc["lng"]), res.get("formatted_address"), res.get("place_id")
-        # Se falhar, tente sem o “, Brasil” (casos de CEP já completo)
-        if status in ("ZERO_RESULTS", "INVALID_REQUEST"):
-            params["address"] = address_or_cep
-            r2 = requests.get(url, params=params, timeout=12)
-            data2 = r2.json()
-            if data2.get("status") == "OK":
-                res = data2["results"][0]
-                loc = res["geometry"]["location"]
-                return float(loc["lat"]), float(loc["lng"]), res.get("formatted_address"), res.get("place_id")
-    except requests.RequestException:
-        pass
-    return None, None, None, None
-
-def google_maps_search_url(q: str):
-    from urllib.parse import quote
-    return f"https://www.google.com/maps/search/?api=1&query={quote(q)}"
-
-def get_coordinates(address):
-    """Usa Google Geocoding com viés para a região de Campinas."""
-    if not address:
-        return None, None, None, None
-    return geocode_google_biased(address)
-
-# No handler principal (quando o usuário manda address sem cidade):
-# ...
-user_lat, user_lon, formatted, place_id = get_coordinates(user_address)
-if not user_lat or not user_lon:
-    return jsonify({"error":"Endereço não encontrado..."}), 404
-
-# Monte um maps_url opcional pra UI
-query_info = {
-    "input_address": formatted or user_address,
-    "lat": user_lat,
-    "lon": user_lon,
-    "place_id": place_id,
-    "maps_url": f"https://www.google.com/maps/search/?api=1&query={user_lat},{user_lon}",
-}
-# inclua query_info no JSON de resposta
-
-
-def normalize_whatsapp(raw: str) -> str:
-    """Deixa só dígitos e retorna com DDI BR (55) se faltar. Útil se quiser expor no backend."""
-    if not raw:
-        return ""
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) == 10 or len(digits) == 11:
-        return f"55{digits}"
-    if digits.startswith("55"):
-        return digits
-    # fallback: se veio com DDI diferente, tenta últimos 11
-    if len(digits) > 11:
-        return f"55{digits[-11:]}"
-    return digits
-
-def load_churches():
-    """Lê igrejas ativas do Firestore."""
-    churches = []
-    for doc in db.collection(FIRESTORE_COLLECTION).where("active", "==", True).stream():
-        data = doc.to_dict() or {}
-        # só considera as que têm coordenadas
-        if data.get("lat") is None or data.get("lon") is None:
-            continue
-        # opcional: adicione um maps_url baseado no endereço registrado
-        addr = data.get("formatted_address") or data.get("address") or ""
-        data["maps_url"] = google_maps_search_url(addr) if addr else None
-        data["id"] = doc.id
-        churches.append(data)
-    return churches
-
-# ========= HTTP Function =========
-@functions_framework.http
 def gmaps_reverse_geocode(lat: float, lon: float):
-    """
-    Reverse geocoding no Google para exibir endereço interpretado.
-    Retorna (formatted_address, place_id) ou (None, None).
-    """
+    """Reverse geocoding simples para exibir endereço interpretado."""
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {
         "latlng": f"{lat},{lon}",
@@ -234,6 +145,70 @@ def gmaps_reverse_geocode(lat: float, lon: float):
         pass
     return None, None
 
+# =========================
+# Utils
+# =========================
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat = math.radians(float(lat2) - float(lat1))
+    dlon = math.radians(float(lon2) - float(lon1))
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(float(lat1))) * \
+        math.cos(math.radians(float(lat2))) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
+def google_maps_search_url(q: str):
+    return f"https://www.google.com/maps/search/?api=1&query={quote(str(q))}"
+
+def normalize_whatsapp(raw: str) -> str:
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10 or len(digits) == 11:
+        return f"55{digits}"
+    if digits.startswith("55"):
+        return digits
+    if len(digits) > 11:
+        return f"55{digits[-11:]}"
+    return digits
+
+def load_churches():
+    churches = []
+    for doc in db.collection(FIRESTORE_COLLECTION).where("active", "==", True).stream():
+        data = doc.to_dict() or {}
+        lat = data.get("lat")
+        lon = data.get("lon")
+        if lat is None or lon is None:
+            continue
+        item = {
+            "id": doc.id,
+            "name": data.get("name", ""),
+            "address": data.get("address", ""),
+            "formatted_address": data.get("formatted_address", ""),
+            "cep": data.get("cep", ""),
+            "day": data.get("day", ""),
+            "time": data.get("time", ""),
+            "contact": data.get("contact", ""),
+            "lat": float(lat),
+            "lon": float(lon),
+            "active": bool(data.get("active", True)),
+        }
+        # Maps: usa coordenadas (mais preciso)
+        item["maps_url"] = f"https://www.google.com/maps/search/?api=1&query={item['lat']},{item['lon']}"
+        churches.append(item)
+    return churches
+
+def _ok(obj, status=200):
+    return jsonify(obj), status, {"Access-Control-Allow-Origin": "*"}
+
+def _err(msg, status=400):
+    return jsonify({"error": msg}), status, {"Access-Control-Allow-Origin": "*"}
+
+# =========================
+# HTTP Handler (Cloud Run)
+# =========================
+
 @functions_framework.http
 def geocode_and_find_nearest_2(request):
     # CORS preflight
@@ -246,84 +221,82 @@ def geocode_and_find_nearest_2(request):
         }
         return ("", 204, headers)
 
-    headers = {"Access-Control-Allow-Origin": "*"}
-
     req = request.get_json(silent=True) or {}
-    address = (req.get("address") or "").strip()
-    cep = (req.get("cep") or "").strip()
-    limit = int(req.get("limit") or 3)
-    max_distance_km = req.get("max_distance_km")
 
-    # Novo: suportar lat/lon vindos do dispositivo
+    # filtros
+    limit = int(req.get("limit") or 3)
+    limit = max(1, min(limit, 20))
+    max_distance_km = req.get("max_distance_km")
+    try:
+        max_distance_km = float(max_distance_km) if max_distance_km is not None else None
+    except Exception:
+        max_distance_km = None
+
+    # entrada do usuário
     lat_in = req.get("lat")
     lon_in = req.get("lon")
+    address = (req.get("address") or "").strip()
+    cep = (req.get("cep") or "").strip()
 
-    # 1) Obter coordenadas do usuário
-    if lat_in is not None and lon_in is not None:
-        try:
-            user_lat = float(lat_in)
-            user_lon = float(lon_in)
-        except ValueError:
-            return (jsonify({"error": "Parâmetros 'lat' e 'lon' inválidos."}), 400, headers)
-        # Reverse geocoding opcional p/ exibir endereço interpretado
+    # 1) origem do usuário
+    user_lat = user_lon = None
+    formatted = None
+    place_id = None
+
+    if isinstance(lat_in, (int, float)) and isinstance(lon_in, (int, float)):
+        user_lat, user_lon = float(lat_in), float(lon_in)
         formatted, place_id = gmaps_reverse_geocode(user_lat, user_lon)
+        if not formatted:
+            formatted = "Localização do dispositivo"
     else:
         if not address and not cep:
-            return (jsonify({"error": "Forneça 'address'/'cep' ou 'lat' e 'lon'."}), 400, headers)
-        user_query = address or cep
-        user_lat, user_lon, formatted, place_id = gmaps_geocode(user_query)
+            return _err("Forneça 'address'/'cep' ou 'lat' e 'lon'.", 400)
+        query = address or cep
+        user_lat, user_lon, formatted, place_id = geocode_google_biased(query)
         if user_lat is None or user_lon is None:
-            return (jsonify({"error": "Não foi possível geocodificar seu endereço/CEP com o Google."}), 404, headers)
+            return _err("Endereço não encontrado. Tente incluir número/bairro/CEP.", 404)
 
-    # 2) Carrega igrejas
+    # 2) igrejas
     churches = load_churches()
 
-    # 3) Calcula distâncias
+    # 3) distâncias + raio
     scored = []
     for ch in churches:
         d = haversine_km(user_lat, user_lon, ch["lat"], ch["lon"])
+        if (max_distance_km is not None) and (d > max_distance_km):
+            continue
         scored.append((d, ch))
+
     scored.sort(key=lambda x: x[0])
+    top = scored[:limit]
 
-    # 4) Aplica raio se houver
-    if max_distance_km is not None:
-        try:
-            m = float(max_distance_km)
-            scored = [item for item in scored if item[0] <= m]
-        except Exception:
-            pass
-
-    # 5) Limite
-    scored = scored[:max(1, min(limit, 20))]
-
-    # 6) Monta resposta
+    # 4) resposta
     nearest = []
-    for dist_km, ch in scored:
+    for dist_km, ch in top:
         nearest.append({
             "id": ch["id"],
-            "name": ch.get("name"),
-            "address": ch.get("formatted_address") or ch.get("address"),
-            "cep": ch.get("cep"),
-            "day": ch.get("day"),
-            "time": ch.get("time"),
-            "contact": ch.get("contact"),
-            "lat": ch.get("lat"),
-            "lon": ch.get("lon"),
-            "maps_url": ch.get("maps_url"),
-            "distance": round(float(dist_km), 2),
+            "name": ch["name"],
+            "address": ch["formatted_address"] or ch["address"],
+            "cep": ch["cep"],
+            "day": ch["day"],
+            "time": ch["time"],
+            "contact": ch["contact"],
+            "lat": ch["lat"],
+            "lon": ch["lon"],
+            "maps_url": ch["maps_url"],
+            "distance_km": round(dist_km, 2),
+            "distance": round(dist_km, 2),  # compat
         })
 
-    # Endereço interpretado + link do Maps para a posição do usuário
-    input_addr = formatted or (address or cep or f"{user_lat},{user_lon}")
     resp = {
         "query": {
-            "input_address": input_addr,
-            "maps_url": google_maps_search_url(input_addr),
+            "input_address": formatted or (address or cep or f"{user_lat},{user_lon}"),
             "lat": user_lat,
             "lon": user_lon,
             "place_id": place_id,
+            "maps_url": f"https://www.google.com/maps/search/?api=1&query={user_lat},{user_lon}",
             "provider": "googlemaps",
         },
         "nearest_churches": nearest,
     }
-    return (jsonify(resp), 200, headers)
+    return _ok(resp, 200)
