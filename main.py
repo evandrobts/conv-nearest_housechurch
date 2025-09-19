@@ -6,6 +6,101 @@ import functions_framework
 from flask import jsonify, request
 from google.cloud import firestore
 
+# ======= Config região de Campinas =======
+CAMPINAS_CENTER = (-22.90556, -47.06083)  # Praça Luiz de Camões ~ centro
+# Retângulo que cobre Campinas, Valinhos, Vinhedo, parte de Hortolândia
+BBOX_SW = os.environ.get("BBOX_SW", "")  # sudoeste (lat, lon)
+BBOX_NE = os.environ.get("BBOX_NE", "")  # nordeste (lat, lon)
+
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+
+# Prioridade por tipo de resultado do Geocoding (quanto menor, melhor)
+_GEOCODE_TYPE_PRIORITY = {
+    "street_address": 0,
+    "premise": 1,
+    "subpremise": 2,
+    "route": 3,
+    "neighborhood": 4,
+    "sublocality": 5,
+    "locality": 6,
+    "political": 9,
+}
+
+def _score_geocode_result(res):
+    types = res.get("types", [])
+    base = min((_GEOCODE_TYPE_PRIORITY.get(t, 8) for t in types), default=8)
+    # bônus se cair dentro do retângulo
+    try:
+        loc = res["geometry"]["location"]
+        lat, lng = float(loc["lat"]), float(loc["lng"])
+        in_bbox = (BBOX_SW[0] <= lat <= BBOX_NE[0]) and (BBOX_SW[1] <= lng <= BBOX_NE[1])
+        if in_bbox:
+            base -= 0.5
+    except Exception:
+        pass
+    return base
+
+def geocode_google_biased(q):
+    """
+    Geocodifica com viés p/ Campinas. Tenta em 3 passos:
+      1) components BR+SP + bounds Campinas
+      2) components BR+SP (sem bounds)
+      3) components BR (fallback amplo)
+    Retorna (lat, lon, formatted_address, place_id) ou (None, None, None, None)
+    """
+    if not GOOGLE_MAPS_API_KEY:
+        return None, None, None, None
+
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+
+    def call(params):
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException:
+            return {"status": "REQUEST_FAILED", "results": []}
+
+    base_params = {
+        "address": q,
+        "key": GOOGLE_MAPS_API_KEY,
+        "region": "br",
+    }
+
+    # 1) Viés forte: BR+SP + bounds no retângulo de Campinas
+    p1 = {
+        **base_params,
+        "components": "country:BR|administrative_area:SP",
+        "bounds": f"{BBOX_SW[0]},{BBOX_SW[1]}|{BBOX_NE[0]},{BBOX_NE[1]}",
+    }
+    data = call(p1)
+    if data.get("status") == "OK" and data.get("results"):
+        best = sorted(data["results"], key=_score_geocode_result)[0]
+        loc = best["geometry"]["location"]
+        return loc["lat"], loc["lng"], best.get("formatted_address"), best.get("place_id")
+
+    # 2) Restrito ao estado (sem bounds)
+    p2 = {**base_params, "components": "country:BR|administrative_area:SP"}
+    data = call(p2)
+    if data.get("status") == "OK" and data.get("results"):
+        best = sorted(data["results"], key=_score_geocode_result)[0]
+        loc = best["geometry"]["location"]
+        return loc["lat"], loc["lng"], best.get("formatted_address"), best.get("place_id")
+
+    # 3) Apenas BR
+    p3 = {**base_params, "components": "country:BR"}
+    data = call(p3)
+    if data.get("status") == "OK" and data.get("results"):
+        best = sorted(data["results"], key=_score_geocode_result)[0]
+        loc = best["geometry"]["location"]
+        return loc["lat"], loc["lng"], best.get("formatted_address"), best.get("place_id")
+
+    return None, None, None, None
+
+
+
+
+
 # ========= Config =========
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 if not GOOGLE_MAPS_API_KEY:
@@ -63,6 +158,29 @@ def gmaps_geocode(address_or_cep: str):
 def google_maps_search_url(q: str):
     from urllib.parse import quote
     return f"https://www.google.com/maps/search/?api=1&query={quote(q)}"
+
+def get_coordinates(address):
+    """Usa Google Geocoding com viés para a região de Campinas."""
+    if not address:
+        return None, None, None, None
+    return geocode_google_biased(address)
+
+# No handler principal (quando o usuário manda address sem cidade):
+# ...
+user_lat, user_lon, formatted, place_id = get_coordinates(user_address)
+if not user_lat or not user_lon:
+    return jsonify({"error":"Endereço não encontrado..."}), 404
+
+# Monte um maps_url opcional pra UI
+query_info = {
+    "input_address": formatted or user_address,
+    "lat": user_lat,
+    "lon": user_lon,
+    "place_id": place_id,
+    "maps_url": f"https://www.google.com/maps/search/?api=1&query={user_lat},{user_lon}",
+}
+# inclua query_info no JSON de resposta
+
 
 def normalize_whatsapp(raw: str) -> str:
     """Deixa só dígitos e retorna com DDI BR (55) se faltar. Útil se quiser expor no backend."""
