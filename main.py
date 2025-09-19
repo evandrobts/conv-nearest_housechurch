@@ -6,6 +6,41 @@ import functions_framework
 from flask import jsonify, request
 from google.cloud import firestore
 from urllib.parse import quote
+import re
+
+CAMPINAS_CENTER = (-22.90556, -47.06083)
+RMC_CITIES = {
+    "campinas", "valinhos", "vinhedo", "hortolândia", "hortolandia",
+    "sumaré", "sumare", "paulínia", "paulinia", "indaiatuba",
+    "americana", "jaguariúna", "jaguariuna", "cosmópolis", "cosmopolis",
+    "monte mor", "louveira", "nova odessa", "santa bárbara d'oeste", "santa barbara d'oeste"
+}
+UF_SIGLAS = {"sp", "são paulo", "sao paulo"}
+
+CEP_RE = re.compile(r"\b\d{5}-?\d{3}\b")
+
+def _km(a_lat, a_lng, b_lat, b_lng):
+    R = 6371.0
+    from math import radians, sin, cos, atan2, sqrt
+    dlat = radians(b_lat - a_lat)
+    dlon = radians(b_lng - a_lng)
+    la1, la2 = radians(a_lat), radians(b_lat)
+    a = sin(dlat/2)**2 + cos(la1)*cos(la2)*sin(dlon/2)**2
+    return 2 * R * atan2(sqrt(a), sqrt(1-a))
+
+def _query_is_ambiguous(q: str) -> bool:
+    """Sem cidade/UF → considerado ambíguo."""
+    if not q: return True
+    s = q.lower()
+    if CEP_RE.search(s):                      # CEP não é ambíguo
+        return False
+    # contém alguma cidade da RMC?
+    if any(name in s for name in RMC_CITIES):
+        return False
+    # contém UF ou 'SP'?
+    if any(tok in s for tok in UF_SIGLAS):
+        return False
+    return True
 
 # =========================
 # Config & Bounds (Campinas)
@@ -67,25 +102,39 @@ _GEOCODE_TYPE_PRIORITY = {
 }
 
 def _score_geocode_result(res):
+    """
+    Score menor = melhor.
+    - Prioriza tipo (street_address < route < …)
+    - Bônus se estiver dentro do BBox
+    - Penaliza distância ao centro de Campinas (até +2 pts)
+    """
     types = res.get("types", [])
     base = min((_GEOCODE_TYPE_PRIORITY.get(t, 8) for t in types), default=8)
     try:
         loc = res["geometry"]["location"]
         lat, lng = float(loc["lat"]), float(loc["lng"])
+        # bônus por cair dentro do retângulo
         in_bbox = (BBOX_S <= lat <= BBOX_N) and (BBOX_W <= lng <= BBOX_E)
         if in_bbox:
             base -= 0.5
+        # penalidade gradual por distância ao centro
+        d_km = _km(CAMPINAS_CENTER[0], CAMPINAS_CENTER[1], lat, lng)
+        base += min(d_km / 50.0, 2.0)  # até +2
     except Exception:
         pass
     return base
 
-def geocode_google_biased(q):
+
+def geocode_google_biased(q: str):
     """
-    1) BR+SP + bounds (Campinas)
-    2) BR+SP
-    3) BR
+    Ordem de tentativas:
+      A) (se ambígua) address = "<q>, Campinas - SP", components=locality:Campinas|administrative_area:SP|country:BR
+      B) address = q, components=country:BR|administrative_area:SP, bounds=Campinas
+      C) address = q, components=country:BR|administrative_area:SP
+      D) address = q, components=country:BR
+    Retorna (lat, lon, formatted_address, place_id) ou (None, None, None, None)
     """
-    if not q:
+    if not GOOGLE_MAPS_API_KEY or not q:
         return None, None, None, None
 
     url = "https://maps.googleapis.com/maps/api/geocode/json"
@@ -96,36 +145,55 @@ def geocode_google_biased(q):
             r.raise_for_status()
             return r.json()
         except requests.RequestException:
-            return {"status": "REQUEST_FAILED", "results": []}
+            return {"status":"REQUEST_FAILED","results":[]}
 
-    base_params = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br"}
+    def pick_best(data):
+        if data.get("status") == "OK" and data.get("results"):
+            best = sorted(data["results"], key=_score_geocode_result)[0]
+            loc = best["geometry"]["location"]
+            return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
+        return None
 
-    p1 = {
-        **base_params,
+    # CEP → deixe o Google trabalhar sem “colar Campinas”
+    if CEP_RE.search(q):
+        base = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br", "components": "country:BR"}
+        got = pick_best(call(base))
+        if got: return got
+
+    # A) se ambígua, força Campinas na address + components
+    if _query_is_ambiguous(q):
+        a = {
+            "address": f"{q}, Campinas - SP",
+            "key": GOOGLE_MAPS_API_KEY,
+            "region": "br",
+            "components": "locality:Campinas|administrative_area:SP|country:BR",
+        }
+        got = pick_best(call(a))
+        if got: return got
+
+    # B) SP + bounds (Campinas)
+    b = {
+        "address": q,
+        "key": GOOGLE_MAPS_API_KEY,
+        "region": "br",
         "components": "country:BR|administrative_area:SP",
         "bounds": f"{BBOX_SW[0]},{BBOX_SW[1]}|{BBOX_NE[0]},{BBOX_NE[1]}",
     }
-    data = call(p1)
-    if data.get("status") == "OK" and data.get("results"):
-        best = sorted(data["results"], key=_score_geocode_result)[0]
-        loc = best["geometry"]["location"]
-        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
+    got = pick_best(call(b))
+    if got: return got
 
-    p2 = {**base_params, "components": "country:BR|administrative_area:SP"}
-    data = call(p2)
-    if data.get("status") == "OK" and data.get("results"):
-        best = sorted(data["results"], key=_score_geocode_result)[0]
-        loc = best["geometry"]["location"]
-        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
+    # C) SP
+    c = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br", "components": "country:BR|administrative_area:SP"}
+    got = pick_best(call(c))
+    if got: return got
 
-    p3 = {**base_params, "components": "country:BR"}
-    data = call(p3)
-    if data.get("status") == "OK" and data.get("results"):
-        best = sorted(data["results"], key=_score_geocode_result)[0]
-        loc = best["geometry"]["location"]
-        return float(loc["lat"]), float(loc["lng"]), best.get("formatted_address"), best.get("place_id")
+    # D) BR
+    d = {"address": q, "key": GOOGLE_MAPS_API_KEY, "region": "br", "components": "country:BR"}
+    got = pick_best(call(d))
+    if got: return got
 
     return None, None, None, None
+
 
 def gmaps_reverse_geocode(lat: float, lon: float):
     """Reverse geocoding simples para exibir endereço interpretado."""
