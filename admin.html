@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Admin • Igrejas Caseiras</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .card { @apply bg-white rounded-xl shadow p-5; }
+    .btn { @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition; }
+    .btn-primary { @apply text-white bg-gray-900 hover:bg-gray-700; }
+    .btn-ghost { @apply bg-gray-100 text-gray-900 hover:bg-gray-200; }
+    .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
+    .chip { @apply inline-flex items-center gap-2 text-xs px-2 py-1 rounded bg-gray-100 text-gray-900; }
+    .input { @apply w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900; }
+    .label { @apply block text-xs font-medium text-gray-700 mb-1; }
+    .row { @apply grid grid-cols-1 sm:grid-cols-2 gap-3; }
+    .row3 { @apply grid grid-cols-1 sm:grid-cols-3 gap-3; }
+    .row4 { @apply grid grid-cols-1 md:grid-cols-4 gap-3; }
+    .table th, .table td { @apply px-3 py-2 text-sm; }
+  </style>
+  <!-- Firebase SDKs (compat para simplicidade em single-file) -->
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen text-[15px] md:text-[16px]">
+
+  <!-- Navbar -->
+  <header class="bg-white border-b sticky top-0 z-20">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <i class="fas fa-church text-gray-900"></i>
+        <h1 class="font-semibold text-base md:text-lg">Admin • Igrejas Caseiras</h1>
+        <span class="ml-3 text-xs text-gray-500" id="projectHint"></span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span id="userEmail" class="text-sm text-gray-600"></span>
+        <button id="logoutBtn" class="btn btn-ghost"><i class="fa-solid fa-right-from-bracket"></i> Sair</button>
+      </div>
+    </div>
+  </header>
+
+<main class="max-w-6xl mx-auto p-4 pt-6">
+    <!-- Auth gate -->
+    <section id="authView" class="card max-w-md mx-auto mt-12 hidden">
+      <h2 class="text-lg font-semibold mb-1">Acesso restrito</h2>
+      <p class="text-sm text-gray-600 mb-4">Entre com sua conta autorizada para gerenciar as igrejas.</p>
+
+      <div class="space-y-3">
+        <button id="googleBtn" class="btn btn-primary w-full justify-center"><i class="fa-brands fa-google"></i> Entrar com Google</button>
+        <div class="text-xs text-gray-500">Somente e-mails autorizados terão acesso.</div>
+      </div>
+    </section>
+
+    <!-- App -->
+    <section id="appView" class="hidden">
+      <!-- Toolbar -->
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+        <div class="flex items-center gap-2">
+          <button id="addBtn" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Nova igreja</button>
+          <button id="refreshBtn" class="btn btn-ghost"><i class="fa-solid fa-rotate"></i> Atualizar</button>
+          <button id="exportCsvBtn" class="btn btn-ghost"><i class="fa-solid fa-file-arrow-down"></i> Exportar CSV</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="searchBox" class="input" placeholder="Buscar por nome, bairro, CEP..." />
+        </div>
+      </div>
+
+      <!-- Listagem -->
+      <div class="card overflow-x-auto p-0 rounded-xl">
+        <table class="table w-full">
+          <thead class="text-left text-[11px] md:text-xs uppercase text-gray-500">
+            <tr.className = "text-xs md:text-sm";>
+              <th data-sort="name" class="cursor-pointer select-none">Nome <i class="fa-solid fa-sort ml-1 text-gray-400"></i></th>
+              <th data-sort="address" class="cursor-pointer select-none">Endereço <i class="fa-solid fa-sort ml-1 text-gray-400"></i></th>
+              <th data-sort="cep" class="cursor-pointer select-none">CEP <i class="fa-solid fa-sort ml-1 text-gray-400"></i></th>
+              <th data-sort="daytime" class="cursor-pointer select-none">Dia/Hora <i class="fa-solid fa-sort ml-1 text-gray-400"></i></th>
+              <th data-sort="contact" class="cursor-pointer select-none">Contato <i class="fa-solid fa-sort ml-1 text-gray-400"></i></th>
+              <th data-sort="active" class="text-center cursor-pointer select-none">Ativo <i class="fa-solid fa-sort ml-1 text-gray-400"></i></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rows" class="text-[12px] md:text-[13px] leading-tight"></tbody>
+        </table>
+      </div>
+
+      <!-- Paginação -->
+      <div class="mt-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <label class="text-sm text-gray-600">Itens por página</label>
+          <select id="pageSize" class="input w-28">
+            <option>5</option>
+            <option selected>10</option>
+            <option>20</option>
+            <option>50</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-3">
+          <button id="prevPage" class="btn btn-ghost"><i class="fa-solid fa-angle-left"></i></button>
+          <span id="pageInfo" class="text-sm text-gray-600">Página 1 de 1</span>
+          <button id="nextPage" class="btn btn-ghost"><i class="fa-solid fa-angle-right"></i></button>
+        </div>
+      </div>
+
+      <p id="emptyState" class="text-center text-gray-500 text-sm mt-6 hidden">Nenhuma igreja encontrada.</p>
+    </section>
+  </main>
+
+  <!-- Modal -->
+  <!-- Modal -->
+<div id="modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+  <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6">
+    <div class="sticky top-0 bg-white pb-3 -mt-2 mb-3">
+      <div class="flex items-center justify-between">
+        <h3 id="modalTitle" class="text-lg font-semibold">Nova igreja</h3>
+        <button id="closeModal" class="inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium bg-gray-100 hover:bg-gray-200">
+          <i class="fa-solid fa-xmark"></i>
+          Fechar
+        </button>
+      </div>
+      <hr class="mt-3">
+    </div>
+
+    <form id="form" class="space-y-4">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Nome do responsável</label>
+          <input id="f_name" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" required />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Contato (telefone)</label>
+          <input id="f_contact" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" placeholder="(19) 99999-9999" />
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-gray-700 mb-1">Endereço</label>
+        <input id="f_address" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" placeholder="Rua, número, bairro, cidade - UF" />
+        <p class="text-xs text-gray-500 mt-1">Dica: mantenha <em>Rua, nº, Bairro, Cidade - UF</em>. Lat/Lon podem ser preenchidos manualmente ou via botão do Google.</p>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">CEP</label>
+          <input id="f_cep" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" placeholder="13000-000" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Dia</label>
+          <input id="f_day" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" placeholder="Quartas-feiras" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Hora</label>
+          <input id="f_time" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" placeholder="19h30" />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Latitude</label>
+          <input id="f_lat" type="number" step="0.0000001" placeholder="-22.9" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Longitude</label>
+          <input id="f_lon" type="number" step="0.0000001" placeholder="-47.0" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-gray-900" />
+        </div>
+        <div class="flex items-end gap-2">
+          <a id="mapsHelper" href="#" target="_blank" class="inline-flex items-center justify-center px-4 py-2 rounded-md text-sm font-medium bg-gray-100 hover:bg-gray-200 flex-1">
+            <i class="fa-solid fa-map-location-dot mr-2"></i> Abrir no Maps
+          </a>
+          <button type="button" id="geoFillBtn" class="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-gray-900 hover:bg-gray-700">
+            <i class="fa-solid fa-magnifying-glass-location"></i> Preencher lat/lon
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <label class="inline-flex items-center gap-2">
+          <input id="f_active" type="checkbox" class="h-4 w-4" checked />
+          <span class="text-sm">Ativo</span>
+        </label>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2">
+        <button type="button" id="deleteBtn" class="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-red-600 hover:bg-red-700 hidden">
+          <i class="fa-solid fa-trash"></i> Excluir
+        </button>
+        <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium text-white bg-gray-900 hover:bg-gray-700">
+          <i class="fa-solid fa-floppy-disk"></i> Salvar
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+/* =====================
+   🔧 CONFIG FIREBASE
+   ===================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyAeozBZ75eEHBkvKgW1c0-aCpeWh0wXF3E",
+  authDomain: "devwork01.firebaseapp.com",
+  projectId: "devwork01",
+  storageBucket: "devwork01.firebasestorage.app", /* <- ajuste importante */
+  messagingSenderId: "891569474486",
+  appId: "1:891569474486:web:e2e43be2c23cb44017cf17"
+};
+
+const ALLOWED_ADMINS = [
+  "evandro.bs@gmail.com",
+  "jakelinepsantos23@gmail.com",
+  "campinas@movimentoconvergencia.com.br"
+];
+
+const COLLECTION = "churches";
+const ADMIN_GEOCODE_URL = "https://nearest-house-conv-891569474486.us-east5.run.app";
+
+/* =====================
+   🚀 FIREBASE INIT
+   ===================== */
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db   = firebase.firestore();
+
+/* =====================
+   🔐 AUTH
+   ===================== */
+var authView   = document.getElementById('authView');
+var appView    = document.getElementById('appView');
+var userEmailEl= document.getElementById('userEmail');
+var projectHint= document.getElementById('projectHint');
+
+var googleBtn  = document.getElementById('googleBtn');
+var logoutBtn  = document.getElementById('logoutBtn');
+
+auth.onAuthStateChanged(function(user){
+  if (!user) {
+    authView.classList.remove('hidden');
+    appView.classList.add('hidden');
+    userEmailEl.textContent = '';
+    return;
+  }
+  var email = user.email || '';
+  userEmailEl.textContent = email;
+  projectHint.textContent = 'Projeto: ' + (firebase.app().options.projectId || '');
+
+  var allowed = ALLOWED_ADMINS.indexOf(email) !== -1;
+  if (!allowed) {
+    alert('Sua conta não está autorizada.');
+    auth.signOut();
+    return;
+  }
+  authView.classList.add('hidden');
+  appView.classList.remove('hidden');
+  loadList();
+});
+
+googleBtn.addEventListener('click', function(){
+  var provider = new firebase.auth.GoogleAuthProvider();
+  auth.signInWithPopup(provider).catch(function(e){
+    alert('Falha ao autenticar: ' + e.message);
+  });
+});
+
+logoutBtn.addEventListener('click', function(){ auth.signOut(); });
+
+/* =====================
+   📋 LISTA + BUSCA + ORDENAÇÃO + PAGINAÇÃO
+   ===================== */
+var rowsEl      = document.getElementById('rows');
+var emptyState  = document.getElementById('emptyState');
+var searchBox   = document.getElementById('searchBox');
+var pageSizeEl  = document.getElementById('pageSize');
+var prevPageBtn = document.getElementById('prevPage');
+var nextPageBtn = document.getElementById('nextPage');
+var pageInfoEl  = document.getElementById('pageInfo');
+
+var cached  = [];
+var sortKey = 'name';
+var sortDir = 'asc';
+var page    = 1;
+var pageSize= 10;
+
+function loadList(){
+  rowsEl.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">Carregando...</td></tr>';
+  db.collection(COLLECTION).orderBy('name').get()
+    .then(function(snap){
+      cached = snap.docs.map(function(d){ var v=d.data(); v.id=d.id; return v; });
+      page = 1;
+      renderRows();
+    })
+    .catch(function(e){
+      rowsEl.innerHTML = '<tr><td colspan="7" class="text-center text-red-600 py-6">Erro: '+e.message+'</td></tr>';
+    });
+}
+
+function renderRows(){
+  var q = (searchBox.value || '').toLowerCase();
+
+  // filtro
+  var list = cached.filter(function(it){
+    var hay = (
+      (it.name||'')+' '+
+      (it.address||'')+' '+
+      (it.formatted_address||'')+' '+
+      (it.cep||'')+' '+
+      (it.day||'')+' '+
+      (it.time||'')+' '+
+      (it.contact||'')
+    ).toLowerCase();
+    return hay.indexOf(q) !== -1;
+  });
+
+  // ordenacao
+  function keyOf(it){
+    if (sortKey === 'name')    return (it.name||'').toLowerCase();
+    if (sortKey === 'address') return ((it.formatted_address||it.address)||'').toLowerCase();
+    if (sortKey === 'cep')     return (it.cep||'');
+    if (sortKey === 'daytime') return ((it.day||'')+' '+(it.time||'')).toLowerCase();
+    if (sortKey === 'contact') return (it.contact||'').toLowerCase();
+    if (sortKey === 'active')  return it.active ? 1 : 0;
+    return (it.name||'').toLowerCase();
+  }
+  list.sort(function(a,b){
+    var va = keyOf(a), vb = keyOf(b);
+    if (va < vb) return (sortDir === 'asc') ? -1 : 1;
+    if (va > vb) return (sortDir === 'asc') ?  1 : -1;
+    return 0;
+  });
+
+  // paginacao
+  var total = list.length;
+  var pages = Math.max(1, Math.ceil(total / pageSize));
+  if (page > pages) page = pages;
+  var start = (page - 1) * pageSize;
+  var slice = list.slice(start, start + pageSize);
+
+  // render
+  rowsEl.innerHTML = '';
+if (!slice.length) {
+  emptyState.classList.remove('hidden');
+} else {
+  emptyState.classList.add('hidden');
+  for (const it of slice) {
+    const name    = escapeHtml(it.name || '');
+    const address = escapeHtml((it.formatted_address || it.address) || '');
+    const cep     = escapeHtml(it.cep || '');
+    const day     = escapeHtml(it.day || '');
+    const time    = escapeHtml(it.time || '');
+    const contact = escapeHtml(it.contact || '');
+    const active  = it.active
+      ? '<i class="fa-solid fa-circle-check text-emerald-600"></i>'
+      : '<i class="fa-regular fa-circle text-gray-400"></i>';
+
+    const tr = document.createElement('tr');
+    tr.className =
+      // zebra leve + hover + divisória + transição
+      'odd:bg-white even:bg-gray-50/30 hover:bg-gray-50/80 ' +
+      'border-b border-gray-100 transition-colors duration-150';
+
+    tr.innerHTML = `
+      <td class="px-3 py-1.5 whitespace-nowrap font-medium">${name}</td>
+      <td class="px-3 py-1.5 max-w-[360px] truncate" title="${address}">${address}</td>
+      <td class="px-3 py-1.5">${cep}</td>
+      <td class="px-3 py-1.5">
+        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-100 text-gray-900 text-[11px]">
+          <i class="fa-regular fa-calendar"></i>${day}
+        </span>
+        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-100 text-gray-900 text-[11px]">
+          <i class="fa-regular fa-clock"></i>${time}
+        </span>
+      </td>
+      <td class="px-3 py-1.5">${contact}</td>
+      <td class="px-3 py-1.5 text-center">${active}</td>
+      <td class="px-3 py-1.5 text-right">
+        <button class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-gray-100 hover:bg-gray-200"
+                data-edit="${it.id}">
+          <i class="fa-solid fa-pen"></i> Editar
+        </button>
+      </td>
+    `;
+    rowsEl.appendChild(tr);
+  }
+}
+
+  pageInfoEl.textContent = 'Página '+page+' de '+pages+' — '+total+' registro(s)';
+  prevPageBtn.disabled = (page <= 1);
+  nextPageBtn.disabled = (page >= pages);
+}
+
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, function(m){
+    return (
+      m === '&' ? '&amp;' :
+      m === '<' ? '&lt;'  :
+      m === '>' ? '&gt;'  :
+      m === '"' ? '&quot;':
+                  '&#39;'
+    );
+  });
+}
+
+searchBox.addEventListener('input', function(){ page = 1; renderRows(); });
+document.getElementById('refreshBtn').addEventListener('click', loadList);
+
+// paginacao
+pageSizeEl.addEventListener('change', function(){
+  pageSize = parseInt(pageSizeEl.value, 10) || 10;
+  page = 1; renderRows();
+});
+prevPageBtn.addEventListener('click', function(){ if (page>1){ page--; renderRows(); } });
+nextPageBtn.addEventListener('click', function(){ page++; renderRows(); });
+
+// sorting
+document.querySelector('thead').addEventListener('click', function(e){
+  var th = e.target.closest('[data-sort]');
+  if (!th) return;
+  var key = th.getAttribute('data-sort');
+  if (sortKey === key) sortDir = (sortDir === 'asc') ? 'desc' : 'asc';
+  else { sortKey = key; sortDir = 'asc'; }
+  page = 1; renderRows();
+});
+
+// export CSV
+document.getElementById('exportCsvBtn').addEventListener('click', function(){
+  var q = (searchBox.value || '').toLowerCase();
+  var list = cached.filter(function(it){
+    var hay = (
+      (it.name||'')+' '+
+      (it.address||'')+' '+
+      (it.formatted_address||'')+' '+
+      (it.cep||'')+' '+
+      (it.day||'')+' '+
+      (it.time||'')+' '+
+      (it.contact||'')
+    ).toLowerCase();
+    return hay.indexOf(q) !== -1;
+  });
+
+  var rows = [['id','name','address','formatted_address','cep','day','time','contact','lat','lon','active']];
+  list.forEach(function(it){
+    rows.push([
+      it.id||'',
+      it.name||'',
+      it.address||'',
+      it.formatted_address||'',
+      it.cep||'',
+      it.day||'',
+      it.time||'',
+      it.contact||'',
+      (it.lat!=null?it.lat:''),
+      (it.lon!=null?it.lon:''),
+      (it.active?1:0)
+    ]);
+  });
+
+  function csvCell(v){
+    var s = String(v);
+    if (s.indexOf('"') !== -1) s = s.replace(/"/g, '""'); // sem replaceAll
+    var needsQuote = s.indexOf(',') !== -1 || s.indexOf('\n') !== -1;
+    return needsQuote ? ('"'+s+'"') : s;
+  }
+
+  var csv = rows.map(function(r){ return r.map(csvCell).join(','); }).join('\n');
+  var blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href = url; a.download = 'churches_export.csv'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+/* =====================
+   ✏️ MODAL CRUD + GEO
+   ===================== */
+var modal         = document.getElementById('modal');
+var modalTitle    = document.getElementById('modalTitle');
+var closeModalBtn = document.getElementById('closeModal');
+var formEl        = document.getElementById('form');
+var deleteBtn     = document.getElementById('deleteBtn');
+
+var f_name    = document.getElementById('f_name');
+var f_contact = document.getElementById('f_contact');
+var f_address = document.getElementById('f_address');
+var f_cep     = document.getElementById('f_cep');
+var f_day     = document.getElementById('f_day');
+var f_time    = document.getElementById('f_time');
+var f_lat     = document.getElementById('f_lat');
+var f_lon     = document.getElementById('f_lon');
+var f_active  = document.getElementById('f_active');
+var mapsHelper= document.getElementById('mapsHelper');
+var geoFillBtn= document.getElementById('geoFillBtn');
+
+var editingId = null;
+
+function openModal(doc){
+
+  document.body.classList.add('overflow-hidden'); // trava scroll da página
+  modal.classList.remove('hidden');
+  editingId = (doc && doc.id) ? doc.id : null;
+  modalTitle.textContent = editingId ? 'Editar igreja' : 'Nova igreja';
+  if (editingId) deleteBtn.classList.remove('hidden'); else deleteBtn.classList.add('hidden');
+
+  f_name.value    = (doc && doc.name)    ? doc.name    : '';
+  f_contact.value = (doc && doc.contact) ? doc.contact : '';
+  f_address.value = (doc && doc.address) ? doc.address : '';
+  f_cep.value     = (doc && doc.cep)     ? doc.cep     : '';
+  f_day.value     = (doc && doc.day)     ? doc.day     : '';
+  f_time.value    = (doc && doc.time)    ? doc.time    : '';
+  f_lat.value     = (doc && doc.lat!=null) ? doc.lat : '';
+  f_lon.value     = (doc && doc.lon!=null) ? doc.lon : '';
+  f_active.checked= (doc && typeof doc.active==='boolean') ? !!doc.active : true;
+
+  updateMapsHelper();
+  modal.classList.remove('hidden');
+  setTimeout(function(){ f_name.focus(); }, 50);
+}
+
+function closeModal() {
+  modal.classList.add('hidden');
+  document.body.classList.remove('overflow-hidden'); // volta scroll
+  editingId = null;
+  form.reset();
+}
+window.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
+    closeModal();
+  }
+});
+
+function updateMapsHelper(){
+  var q = encodeURIComponent(((f_address.value || '') + ', Brasil').trim());
+  mapsHelper.href = 'https://www.google.com/maps/search/?api=1&query=' + q;
+}
+
+f_address.addEventListener('input', updateMapsHelper);
+
+document.getElementById('addBtn').addEventListener('click', function(){ openModal(null); });
+
+rowsEl.addEventListener('click', function(e){
+  var btn = e.target.closest('[data-edit]');
+  if (!btn) return;
+  var id = btn.getAttribute('data-edit');
+  var doc = null;
+  for (var i=0;i<cached.length;i++) { if (cached[i].id === id) { doc = cached[i]; break; } }
+  if (doc) openModal(doc);
+});
+
+closeModalBtn.addEventListener('click', closeModal);
+modal.addEventListener('click', function(e){ if (e.target === modal) closeModal(); });
+
+formEl.addEventListener('submit', function(e){
+  e.preventDefault();
+  var payload = {
+    name: f_name.value.trim(),
+    contact: f_contact.value.trim(),
+    address: f_address.value.trim(),
+    cep: f_cep.value.trim(),
+    day: f_day.value.trim(),
+    time: f_time.value.trim(),
+    active: !!f_active.checked
+  };
+  var lat = parseFloat(f_lat.value);
+  var lon = parseFloat(f_lon.value);
+  if (!isNaN(lat) && !isNaN(lon)) { payload.lat = lat; payload.lon = lon; }
+
+  if (editingId) {
+    db.collection(COLLECTION).doc(editingId).update({
+      name: payload.name,
+      contact: payload.contact,
+      address: payload.address,
+      cep: payload.cep,
+      day: payload.day,
+      time: payload.time,
+      active: payload.active,
+      lat: payload.lat,
+      lon: payload.lon,
+      updated_at: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(function(){
+      closeModal(); loadList();
+    }).catch(function(e){ alert('Erro ao salvar: ' + e.message); });
+  } else {
+    db.collection(COLLECTION).add({
+      name: payload.name,
+      contact: payload.contact,
+      address: payload.address,
+      cep: payload.cep,
+      day: payload.day,
+      time: payload.time,
+      active: payload.active,
+      lat: payload.lat,
+      lon: payload.lon,
+      created_at: firebase.firestore.FieldValue.serverTimestamp(),
+      updated_at: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(function(){
+      closeModal(); loadList();
+    }).catch(function(e){ alert('Erro ao salvar: ' + e.message); });
+  }
+});
+
+deleteBtn.addEventListener('click', function(){
+  if (!editingId) return;
+  if (!confirm('Tem certeza que deseja excluir este registro?')) return;
+  db.collection(COLLECTION).doc(editingId).delete()
+    .then(function(){ closeModal(); loadList(); })
+    .catch(function(e){ alert('Erro ao excluir: ' + e.message); });
+});
+
+// geocodificar via backend e preencher
+geoFillBtn.addEventListener('click', function(){
+  var query = (f_address.value || f_cep.value || '').trim();
+  if (!query) { alert('Preencha o endereço ou CEP primeiro.'); return; }
+  var labelOrig = geoFillBtn.innerHTML;
+  geoFillBtn.disabled = true;
+  geoFillBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Buscando...';
+
+  fetch(ADMIN_GEOCODE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({ address: query, limit: 1 })
+  })
+  .then(function(res){ return res.json().then(function(j){ return {ok:res.ok, data:j}; }); })
+  .then(function(resp){
+    if (!resp.ok) throw new Error(resp.data && resp.data.error ? resp.data.error : 'Falha na geocodificacao');
+    var q = resp.data && resp.data.query ? resp.data.query : {};
+    if (typeof q.lat === 'number' && typeof q.lon === 'number') {
+      f_lat.value = q.lat; f_lon.value = q.lon;
+      if (!f_address.value && q.input_address) f_address.value = q.input_address;
+      updateMapsHelper();
+    } else {
+      alert('Não foi possível obter coordenadas para este endereço/CEP.');
+    }
+  })
+  .catch(function(e){ alert('Erro: ' + e.message); })
+  .finally(function(){
+    geoFillBtn.disabled = false;
+    geoFillBtn.innerHTML = labelOrig;
+  });
+});
+
+/* inicial */
+loadList();
+});
+</script>
+
+</body>
+</html>
