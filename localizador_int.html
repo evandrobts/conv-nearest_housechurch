@@ -55,12 +55,23 @@
         </div>
       </div>
 
-      <button
-        type="submit" id="search-button"
-        class="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-[#2D2D2D] hover:bg-gray-700 transition-colors"
-      >
-        Buscar
-      </button>
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+  <button
+    type="submit" id="search-button"
+    class="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-[#2D2D2D] hover:bg-gray-700 transition-colors"
+  >
+    Buscar
+  </button>
+
+  <button
+    type="button" id="geo-button"
+    class="w-full flex justify-center items-center gap-2 py-3 px-4 border rounded-md shadow-sm text-sm font-medium text-[#2D2D2D] bg-white hover:bg-gray-100 transition-colors"
+    title="Usar minha localização atual"
+  >
+    <i class="fas fa-location-crosshairs"></i>
+    Usar minha localização
+  </button>
+</div>
     </form>
 
     <div id="loading-spinner" class="hidden mx-auto my-6 w-8 h-8 rounded-full border-4 border-gray-300"></div>
@@ -92,7 +103,107 @@
   </div>
 
   <script>
-    const API_URL = 'https://us-west2-devwork01.cloudfunctions.net/geocode_and_find_nearest';
+const geoBtn = document.getElementById('geo-button');
+
+// helper: estado de loading
+function setLoading(isLoading, label = 'Buscando...') {
+  if (isLoading) {
+    button.disabled = true;
+    button.textContent = label;
+    spinner.classList.remove('hidden');
+    geoBtn.disabled = true;
+    geoBtn.classList.add('opacity-60', 'pointer-events-none');
+  } else {
+    button.disabled = false;
+    button.textContent = 'Buscar';
+    spinner.classList.add('hidden');
+    geoBtn.disabled = false;
+    geoBtn.classList.remove('opacity-60', 'pointer-events-none');
+  }
+}
+
+// chamada à API com payload genérico
+async function callApi(body) {
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || 'Erro na requisição.');
+  }
+  return data;
+}
+
+// Renderização (reuso do que você já tem)
+function renderResult(data, md) {
+  // header interpretado
+  if (data.query?.input_address) {
+    qAddr.textContent = data.query.input_address;
+    if (data.query.maps_url) {
+      qMaps.href = data.query.maps_url;
+      qMaps.classList.remove('pointer-events-none', 'opacity-50');
+    } else {
+      qMaps.href = '#';
+      qMaps.classList.add('pointer-events-none', 'opacity-50');
+    }
+    qHead.classList.remove('hidden');
+  }
+  const churches = data.nearest_churches || [];
+  if (churches.length === 0) {
+    resultsDiv.innerHTML = `<p class="text-center opacity-70">Nenhuma igreja encontrada${md ? ` no raio de ${md} km` : ''}.</p>`;
+    return;
+  }
+  churches.forEach(ch => resultsDiv.appendChild(makeCard(ch)));
+}
+
+// Clique no botão “Usar minha localização”
+geoBtn.addEventListener('click', () => {
+  if (!('geolocation' in navigator)) {
+    alert('Seu navegador não suporta geolocalização.');
+    return;
+  }
+  resultsDiv.innerHTML = '';
+  qHead.classList.add('hidden');
+  const limitVal = Number(limitEl.value) || 3;
+  const md = Number(maxDistEl.value);
+  setLoading(true, 'Localizando...');
+
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    try {
+      const { latitude, longitude } = pos.coords;
+      const body = { lat: latitude, lon: longitude, limit: limitVal };
+      if (isFinite(md) && md > 0) body.max_distance_km = md;
+
+      const data = await callApi(body);
+      renderResult(data, md);
+    } catch (err) {
+      console.error(err);
+      resultsDiv.innerHTML = `<p class="text-center text-red-600">Erro: ${err.message}</p>`;
+    } finally {
+      setLoading(false);
+    }
+  }, (err) => {
+    console.error(err);
+    let msg = 'Não foi possível obter sua localização.';
+    if (err.code === 1) msg = 'Permissão de localização negada.';
+    if (err.code === 2) msg = 'Posição indisponível.';
+    if (err.code === 3) msg = 'Tempo esgotado para obter a posição.';
+    resultsDiv.innerHTML = `<p class="text-center text-red-600">${msg}</p>`;
+    setLoading(false);
+  }, {
+    enableHighAccuracy: true,
+    timeout: 10000,
+    maximumAge: 0,
+  });
+});
+
+
+
+
+
+    const API_URL = 'https://nearest-house-conv-891569474486.us-east5.run.app';
 
     const form = document.getElementById('search-form');
     const addressEl = document.getElementById('address');
